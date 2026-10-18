@@ -41,6 +41,10 @@ class CodeStore:
     def schedule_save(self) -> None:
         self._store.async_delay_save(self._data, 1)
 
+    async def async_flush(self) -> None:
+        """Write now, cancelling any pending delayed save."""
+        await self._store.async_save(self._data())
+
     def find_by_manual_code(self, manual_code: str) -> dict[str, Any] | None:
         return next(
             (e for e in self.entries.values() if e["manual_code"] == manual_code),

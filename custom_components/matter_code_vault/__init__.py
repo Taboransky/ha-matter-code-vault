@@ -65,7 +65,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Remove the panel."""
+    """Remove the panel and write any pending changes."""
     frontend.async_remove_panel(hass, PANEL_URL_PATH)
-    hass.data.pop(DOMAIN, None)
+    store: CodeStore | None = hass.data.pop(DOMAIN, None)
+    if store is not None:
+        await store.async_flush()
     return True

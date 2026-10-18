@@ -19,12 +19,14 @@ async def setup_vault(hass: HomeAssistant):
     # mark frontend/panel_custom as loaded and stub the panel registration.
     hass.config.components.add("frontend")
     hass.config.components.add("panel_custom")
+    # Patch HA's modules, not "custom_components.matter_code_vault.frontend",
+    # which would resolve to our static frontend/ folder.
     with (
         patch(
-            "custom_components.matter_code_vault.panel_custom.async_register_panel",
+            "homeassistant.components.panel_custom.async_register_panel",
             new=AsyncMock(),
         ) as register_panel,
-        patch("custom_components.matter_code_vault.frontend.async_remove_panel"),
+        patch("homeassistant.components.frontend.async_remove_panel"),
     ):
         entry = MockConfigEntry(domain=DOMAIN, data={})
         entry.add_to_hass(hass)
@@ -32,6 +34,9 @@ async def setup_vault(hass: HomeAssistant):
         await hass.async_block_till_done()
         assert register_panel.await_args.kwargs["frontend_url_path"] == PANEL_URL_PATH
         yield entry
+        # Unloading flushes the delayed save, so no timer lingers after the test.
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_crud(hass: HomeAssistant, setup_vault, hass_ws_client):
