@@ -1,0 +1,15 @@
+{
+  "domain": "matter_code_vault",
+  "name": "Matter Code Vault",
+  "after_dependencies": ["matter"],
+  "codeowners": ["@Taboransky"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/Taboransky/ha-matter-code-vault",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/Taboransky/ha-matter-code-vault/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
