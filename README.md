@@ -49,3 +49,7 @@ pytest
 ```
 
 `pytest tests/test_matter_payload.py --noconftest` runs the code-parsing tests on any Python 3.10+ without Home Assistant installed.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Bundled QR libraries keep their own licenses, see `custom_components/matter_code_vault/frontend/lib/THIRD_PARTY_NOTICES.md`.
