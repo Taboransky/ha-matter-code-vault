@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "matter_code_vault"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 STORAGE_KEY = DOMAIN
 STORAGE_VERSION = 1

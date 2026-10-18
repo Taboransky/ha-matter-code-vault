@@ -99,40 +99,65 @@ async function loadImage(file) {
   }
 }
 
-async function decodeQrFromFile(file, staticUrl) {
-  const img = await loadImage(file);
-
-  if ("BarcodeDetector" in window) {
+let _detector; // undefined = not checked yet, null = unavailable
+async function getDetector() {
+  if (_detector === undefined) {
+    _detector = null;
     try {
-      const formats = await window.BarcodeDetector.getSupportedFormats();
-      if (formats.includes("qr_code")) {
-        const det = new window.BarcodeDetector({ formats: ["qr_code"] });
-        const codes = await det.detect(img);
-        const matter = codes.find((c) => /^MT:/i.test(c.rawValue));
-        if (matter) return matter.rawValue;
-        if (codes.length) return codes[0].rawValue;
+      if ("BarcodeDetector" in window) {
+        const formats = await window.BarcodeDetector.getSupportedFormats();
+        if (formats.includes("qr_code")) {
+          _detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        }
       }
+    } catch (e) {
+      // Use jsQR.
+    }
+  }
+  return _detector;
+}
+
+const _canvas = document.createElement("canvas");
+const _ctx = _canvas.getContext("2d", { willReadFrequently: true });
+
+// Decode a QR code from an <img> or <video>, trying each max dimension in turn.
+// Returns the text of a Matter code if one is found, else of any QR code, else null.
+async function decodeQrFromSource(source, width, height, staticUrl, sizes) {
+  const det = await getDetector();
+  if (det) {
+    try {
+      const codes = await det.detect(source);
+      const matter = codes.find((c) => /^MT:/i.test(c.rawValue));
+      if (matter) return matter.rawValue;
+      if (codes.length) return codes[0].rawValue;
+      // BarcodeDetector is reliable; skip jsQR on live frames.
+      if (source instanceof HTMLVideoElement) return null;
     } catch (e) {
       // Fall through to jsQR.
     }
   }
 
   const jsQR = await loadScript(`${staticUrl}/lib/jsQR.min.js`, "jsQR");
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  // Phone photos are huge; labels are small. Try a few sizes.
-  for (const maxDim of [1000, 1600, 700, 2400]) {
-    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
-    canvas.width = Math.round(img.naturalWidth * scale);
-    canvas.height = Math.round(img.naturalHeight * scale);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const res = jsQR(data.data, canvas.width, canvas.height, {
+  for (const maxDim of sizes) {
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    _canvas.width = Math.round(width * scale);
+    _canvas.height = Math.round(height * scale);
+    _ctx.drawImage(source, 0, 0, _canvas.width, _canvas.height);
+    const data = _ctx.getImageData(0, 0, _canvas.width, _canvas.height);
+    const res = jsQR(data.data, _canvas.width, _canvas.height, {
       inversionAttempts: "attemptBoth",
     });
     if (res && res.data) return res.data;
   }
   return null;
+}
+
+async function decodeQrFromFile(file, staticUrl) {
+  const img = await loadImage(file);
+  // Phone photos are huge; labels are small. Try a few sizes.
+  return decodeQrFromSource(img, img.naturalWidth, img.naturalHeight, staticUrl, [
+    1000, 1600, 700, 2400,
+  ]);
 }
 
 async function copyText(text) {
@@ -249,6 +274,13 @@ label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color:
   background: #323232; color: #fff; padding: 10px 16px; border-radius: 6px; font-size: 14px;
 }
 input[type=file] { display: none; }
+.viewfinder { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 4 / 3; }
+.viewfinder video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.viewfinder .frame {
+  position: absolute; left: 50%; top: 50%; width: 60%; aspect-ratio: 1; transform: translate(-50%, -50%);
+  border: 3px solid rgba(255,255,255,.85); border-radius: 12px; box-shadow: 0 0 0 9999px rgba(0,0,0,.35);
+}
+.error:empty { display: none; }
 @media (max-width: 600px) {
   .content { padding: 12px; }
   .grid { grid-template-columns: 1fr; }
@@ -328,7 +360,7 @@ class MatterCodeVaultPanel extends HTMLElement {
 
     root.querySelector(".actions").addEventListener("click", (ev) => {
       const act = ev.target.closest("button")?.dataset.act;
-      if (act === "camera") root.getElementById("camera").click();
+      if (act === "camera") this._scan();
       if (act === "upload") root.getElementById("upload").click();
       if (act === "manual") this._openDialog({ mode: "manual", code: "", error: "" });
     });
@@ -378,6 +410,8 @@ class MatterCodeVaultPanel extends HTMLElement {
 
   disconnectedCallback() {
     if (this._keyHandler) window.removeEventListener("keydown", this._keyHandler);
+    this._stopNativeScan(false);
+    this._stopCamera();
   }
 
   _ws(type, data = {}) {
@@ -499,6 +533,149 @@ class MatterCodeVaultPanel extends HTMLElement {
 
   // --- Add flows -----------------------------------------------------------
 
+  // --- Scanning ----------------------------------------------------------------
+
+  _scan() {
+    const external = this._hass.auth?.external;
+    if (external?.config?.hasBarCodeScanner && typeof external.receiveMessage === "function") {
+      this._scanNative(external);
+    } else if (window.isSecureContext && navigator.mediaDevices?.getUserMedia) {
+      this._scanLive();
+    } else {
+      this._toast("Live scanning needs the Home Assistant app or HTTPS, so take a photo instead.");
+      this.shadowRoot.getElementById("camera").click();
+    }
+  }
+
+  // Native scanner of the Companion app (same one HA uses for Matter/Z-Wave).
+  // The frontend allows only one command handler, so we wrap receiveMessage to
+  // observe bar_code/* commands and always pass them on to the original, which
+  // still sends the app its result reply.
+  _scanNative(external) {
+    this._stopNativeScan(false);
+    const original = external.receiveMessage;
+    const wrapper = (msg) => {
+      try {
+        if (msg?.type === "command" && msg.command?.startsWith("bar_code/")) {
+          this._onNativeScan(msg);
+        }
+      } finally {
+        original.call(external, msg);
+      }
+    };
+    external.receiveMessage = wrapper;
+    this._native = { external, original, wrapper };
+    external.fireMessage({
+      type: "bar_code/scan",
+      payload: {
+        title: "Scan Matter QR code",
+        description: "Point the camera at the QR code on the device, box or manual.",
+        alternative_option_label: "Type code instead",
+      },
+    });
+  }
+
+  _stopNativeScan(close) {
+    const n = this._native;
+    if (!n) return;
+    this._native = null;
+    // Only restore if nobody wrapped it after us.
+    if (n.external.receiveMessage === n.wrapper) n.external.receiveMessage = n.original;
+    if (close) n.external.fireMessage({ type: "bar_code/close" });
+  }
+
+  _onNativeScan(msg) {
+    const n = this._native;
+    if (!n) return;
+    if (msg.command === "bar_code/scan_result") {
+      const raw = (msg.payload?.rawValue || "").trim();
+      if (/^MT:/i.test(raw)) {
+        this._stopNativeScan(true);
+        this._startNew(raw);
+      } else {
+        n.external.fireMessage({
+          type: "bar_code/notify",
+          payload: { message: "Not a Matter code. Look for the QR code next to the Matter logo." },
+        });
+      }
+    } else if (msg.command === "bar_code/aborted") {
+      this._stopNativeScan(false);
+      if (msg.payload?.reason === "alternative_options") {
+        this._openDialog({ mode: "manual", code: "", error: "" });
+      }
+    }
+  }
+
+  // In-page camera for browsers (needs HTTPS).
+  async _scanLive() {
+    this._openDialog({ mode: "camera", error: "" });
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+    } catch (e) {
+      if (this._dialog?.mode !== "camera") return;
+      this._closeDialog();
+      this._toast("Camera not available, so take a photo instead.");
+      this.shadowRoot.getElementById("camera").click();
+      return;
+    }
+    if (this._dialog?.mode !== "camera") {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const video = this.shadowRoot.querySelector("#dialog video");
+    video.srcObject = stream;
+    const cam = { stream, video, running: true };
+    this._camera = cam;
+    try {
+      await video.play();
+    } catch (e) {
+      // Autoplay of a muted inline video is allowed; ignore odd failures.
+    }
+
+    let notified = false;
+    // About 6 decode attempts per second.
+    const tick = async () => {
+      if (!cam.running) return;
+      if (video.readyState >= 2 && video.videoWidth) {
+        try {
+          const text = await decodeQrFromSource(
+            video, video.videoWidth, video.videoHeight, this._staticUrl, [800]
+          );
+          if (text && cam.running) {
+            if (/^MT:/i.test(text.trim())) {
+              this._stopCamera();
+              this._startNew(text.trim());
+              return;
+            }
+            if (!notified) {
+              notified = true;
+              this._dialog.error = "That QR code is not a Matter code. Look for the one next to the Matter logo.";
+              const err = this.shadowRoot.querySelector("#dialog .error");
+              if (err) err.textContent = this._dialog.error;
+            }
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      setTimeout(tick, 160);
+    };
+    tick();
+  }
+
+  _stopCamera() {
+    const cam = this._camera;
+    if (!cam) return;
+    this._camera = null;
+    cam.running = false;
+    cam.stream.getTracks().forEach((t) => t.stop());
+    cam.video.srcObject = null;
+  }
+
   async _handlePhoto(file) {
     this._openDialog({ mode: "busy", text: "Reading QR code…" });
     let text = null;
@@ -618,11 +795,13 @@ class MatterCodeVaultPanel extends HTMLElement {
   // --- Dialog ----------------------------------------------------------------
 
   _openDialog(state) {
+    if (state.mode !== "camera") this._stopCamera();
     this._dialog = state;
     this._renderDialog();
   }
 
   _closeDialog() {
+    this._stopCamera();
     this._dialog = null;
     this._renderDialog();
   }
@@ -655,6 +834,19 @@ class MatterCodeVaultPanel extends HTMLElement {
     let body = "";
     if (dlg.mode === "busy") {
       body = `<div class="dialog"><h2>${esc(dlg.text)}</h2></div>`;
+    } else if (dlg.mode === "camera") {
+      body = `
+        <div class="dialog">
+          <h2>Scan Matter QR code</h2>
+          <div class="viewfinder"><video autoplay muted playsinline></video><div class="frame"></div></div>
+          <div class="hint">Hold the QR code inside the square. It is read automatically.</div>
+          <div class="error">${esc(dlg.error)}</div>
+          <div class="buttons">
+            <button type="button" class="text" data-act="manual">Type code instead</button>
+            <span class="spacer"></span>
+            <button type="button" class="secondary" data-act="close">Cancel</button>
+          </div>
+        </div>`;
     } else if (dlg.mode === "manual") {
       body = `
         <form class="dialog">
@@ -757,6 +949,7 @@ class MatterCodeVaultPanel extends HTMLElement {
       return;
     }
     if (act === "close") this._closeDialog();
+    if (act === "manual") this._openDialog({ mode: "manual", code: "", error: "" });
     if (act === "copy") {
       const src = this._dialog.entry || this._dialog.payload;
       this._toast((await copyText(src.manual_code)) ? "Code copied" : "Could not copy");

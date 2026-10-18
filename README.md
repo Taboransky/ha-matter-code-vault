@@ -11,10 +11,10 @@ You need these codes again after a factory reset, which is usually long after th
   - its 11-digit code
   - its name, type, room and brand
 - **Search** by name, room, brand, notes or code digits. **Filter** by device type and room.
-- **Scan with your phone**:
-  1. Tap *Scan QR* in the HA Companion app or a mobile browser.
-  2. Take a photo of the label.
-  3. The code is read on the phone.
+- **Scan with your phone**: tap *Scan QR*.
+  - In the HA Companion app (Android/iOS), the app's own camera scanner opens, the same one HA uses to add Matter devices.
+  - In a browser over HTTPS, a live camera view opens in the page.
+  - Otherwise, take a photo, or pick one with *From image*. The code is read on the device.
 - **Automatic product lookup**: the official Matter certification database (CSA DCL) fills in the brand, product and type, e.g. *IKEA of Sweden · KAJPLATS E27 WS globe 470lm · Lamp*.
 - **Type a code** when the label has only the number. The check digit catches typos.
 - **Link to paired devices**: shows *Paired as …* and suggests likely matches from HA's Matter integration.
