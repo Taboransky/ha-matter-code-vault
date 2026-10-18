@@ -1,11 +1,13 @@
 """WebSocket API tests (needs pytest-homeassistant-custom-component)."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.matter_code_vault.const import DOMAIN
+from custom_components.matter_code_vault.const import DOMAIN, PANEL_URL_PATH
 
 REF_QR = "MT:Y.K9042C00KA0648G00"
 REF_MANUAL = "34970112332"
@@ -13,11 +15,23 @@ REF_MANUAL = "34970112332"
 
 @pytest.fixture
 async def setup_vault(hass: HomeAssistant):
-    entry = MockConfigEntry(domain=DOMAIN, data={})
-    entry.add_to_hass(hass)
-    assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-    return entry
+    # The test environment has no built frontend (hass_frontend package), so
+    # mark frontend/panel_custom as loaded and stub the panel registration.
+    hass.config.components.add("frontend")
+    hass.config.components.add("panel_custom")
+    with (
+        patch(
+            "custom_components.matter_code_vault.panel_custom.async_register_panel",
+            new=AsyncMock(),
+        ) as register_panel,
+        patch("custom_components.matter_code_vault.frontend.async_remove_panel"),
+    ):
+        entry = MockConfigEntry(domain=DOMAIN, data={})
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert register_panel.await_args.kwargs["frontend_url_path"] == PANEL_URL_PATH
+        yield entry
 
 
 async def test_crud(hass: HomeAssistant, setup_vault, hass_ws_client):
